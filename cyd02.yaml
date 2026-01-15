@@ -1,0 +1,343 @@
+esphome:
+  name: cyd02
+  friendly_name: cyd02
+  includes: 
+    <sstream>
+
+# Fix using: https://community.home-assistant.io/t/history-chart-or-graph-for-hardware-display-in-esphome/285516/6
+
+esp32:
+  board: nodemcu-32s
+  framework:
+    type: arduino
+
+logger:
+  tx_buffer_size: 2048
+  level: DEBUG
+
+debug:
+  update_interval: 60s
+
+api:
+  encryption:
+    key: !secret cyd02_api
+
+ota:
+  - platform: esphome
+    password: !secret cyd02_ota
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Display1 Fallback Hotspot"
+    password: !secret cyd02_ap
+
+captive_portal:
+
+sensor:
+  - platform: homeassistant
+    entity_id: sensor.nordpool_kwh_no1_nok_3_10_025
+    id: price_sensor
+    internal: true
+  - platform: homeassistant
+    entity_id: sensor.tibber_pulse_hjemme_power
+    id: usage_sensor
+    internal: true
+  - platform: homeassistant
+    force_update: True
+    entity_id: sensor.outside_temperature
+    id: outdoor_t
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            ESP_LOGD("custom1", "Temperature %.2f", id(outdoor_t));
+            for (int i = 287; i > 0; i--) {
+              id(outdoor_history)[i] = id(outdoor_history)[i-1];
+              }
+            id(outdoor_history)[0] = id(outdoor_t).state;
+            ESP_LOGD("custom2", "New value %.2f", id(outdoor_t).state);
+            ESP_LOGD("custom3", "Pos.1 %.2f", id(outdoor_history)[1]);
+
+            ESP_LOGD("custom", "Max %.2f", id(outdoor_history_max));
+            ESP_LOGD("custom", "Min %.2f", id(outdoor_history_min));
+            int index = 0;
+            float data;
+            id(outdoor_history_max) = INT_MIN;
+            id(outdoor_history_min) = INT_MAX;
+
+            for (int i = 0; i < 288; i++) {
+              if(id(outdoor_history)[i] > id(outdoor_history_max)) id(outdoor_history_max) = id(outdoor_history)[i];
+              if(id(outdoor_history)[i] < id(outdoor_history_min)) id(outdoor_history_min) = id(outdoor_history)[i];
+              }
+ 
+            ESP_LOGD("custom", "Max %.2f", id(outdoor_history_max));
+            ESP_LOGD("custom", "Min %.2f", id(outdoor_history_min));
+
+            // Smooth out data with moving average filter
+            const int half_window_length = 8;
+            float sum;
+            for (int i = 0; i < 288; i++) {
+              sum = 0;
+              for(int k = -half_window_length; k < half_window_length; k++) {
+                index = i + k;
+                if (index < 0) {
+                  data = id(outdoor_history)[0];
+                } else if (index > 287) {
+                  data = id(outdoor_history)[287];
+                } else {
+                 data = id(outdoor_history)[index];
+                }
+                sum += data;
+              }
+              id(outdoor_history_filtered)[i] = sum / (2*half_window_length); 
+            }
+
+globals:
+  - id: show_power
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: display_timer
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: outdoor_history
+    type: float[288]
+    restore_value: no
+  - id: outdoor_history_filtered
+    type: float[288]
+  - id: outdoor_history_max
+    type: float
+  - id: outdoor_history_min
+    type: float
+
+time:
+  - platform: homeassistant
+    id: esptime
+
+spi:
+- id: "disp"
+  clk_pin: 
+    number: GPIO14
+  mosi_pin: 
+    number: GPIO13
+  miso_pin: 
+    number: GPIO12
+    ignore_strapping_warning: True
+  
+- id: "touch"
+  clk_pin: 
+    number: GPIO25
+  mosi_pin: 
+    number: GPIO32
+  miso_pin: 
+    number: GPIO39
+
+touchscreen:
+  - platform: xpt2046
+    spi_id: "touch"
+    cs_pin: 
+      number: 33
+    id: my_touchscreen
+    update_interval: 10ms
+    threshold: 400
+    calibration: 
+      x_min: 340
+      x_max: 3840
+      y_min: 210
+      y_max: 3670
+    transform:
+      swap_xy: False
+      mirror_x: True
+      mirror_y: False
+    on_touch:
+        - lambda: |-
+              id(show_power) = true;
+              id(display_timer) = id(esptime).now().timestamp + 5;
+output:
+  - platform: ledc
+    pin: 21
+    id: gpio_21_backlight_pwm
+  - platform: ledc
+    pin: 17
+    id: gpio_17_pwm
+  - platform: ledc
+    pin: 16
+    id: gpio_16_pwm
+  - platform: ledc
+    pin: 4
+    id: gpio_4_pwm    
+
+light:
+  - platform: monochromatic
+    output: gpio_21_backlight_pwm
+    name: "Display Backlight"
+    id: back_light
+    restore_mode: ALWAYS_ON
+  - platform: monochromatic
+    output: gpio_17_pwm
+    name: "RGB1"
+    id: rgb1
+    restore_mode: ALWAYS_ON
+  - platform: monochromatic
+    output: gpio_16_pwm
+    name: "RGB2"
+    id: rgb2
+    restore_mode: ALWAYS_ON
+  - platform: monochromatic
+    output: gpio_4_pwm
+    name: "RGB3"
+    id: rgb3
+    restore_mode: ALWAYS_ON
+
+color:
+  - id: my_text_color
+    red: 100%
+    green: 0%
+    blue: 100%
+  - id: plot_color
+    red: 53%
+    green: 81%
+    blue: 98%
+  - id: my_time_color
+    red: 100%
+    green: 100%
+    blue: 100%
+font:
+  - file: "fonts/helvetica.ttf"
+    id: helvetica_text
+    size: 60
+  - file: "fonts/helvetica.ttf"
+    id: helvetica_unit
+    size: 28
+  - file: "fonts/helvetica.ttf"
+    id: helvetica_scale
+    size: 14
+
+image:
+  - file: mdi:transmission-tower
+    id: eletricity
+    resize: 30x30
+    type: binary
+  - file: mdi:home-lightning-bolt
+    id: eletricity_useage
+    resize: 30x30
+    type: binary
+  - file: mdi:home-thermometer-outline
+    id: outdoor_temp
+    resize: 30x30
+    type: binary
+
+display:
+  - platform: ili9xxx
+    model: ili9341
+    dimensions:
+      height: 240
+      width: 320
+    invert_colors: False
+    rotation: 0
+    spi_id: "disp"
+    cs_pin:
+      number: GPIO15
+      ignore_strapping_warning: True
+    dc_pin:
+      number: GPIO2
+      ignore_strapping_warning: True
+    update_interval: 5s
+    color_palette: 8BIT
+#    auto_clear_enabled: True
+#    transform:
+#      mirror_x: False
+#      mirror_y: False
+#      swap_xy: True
+    lambda: |-
+      auto font = id(helvetica_text);
+      auto font_unit = id(helvetica_unit);
+      auto font_scale = id(helvetica_scale);
+      auto black = Color(0, 0, 0);
+      auto white = Color(255, 255, 255);
+      auto red = Color(255, 0, 0);
+      auto line_space = 74;
+      auto line1 = 0;
+      auto line2 = line1 + line_space;
+      auto line3 = line2 + line_space;
+
+      auto icon_offset = 2;
+      auto unit_offset = 36;
+      auto col1 =  0;
+      auto col2  = 45;
+
+      auto line_graph = 73;
+      auto col_graph  = 31;
+
+      #define CEIL5(x) (ceil(x / 5.0) * 5.0)
+      #define FLOOR5(x) (floor(x / 5.0) * 5.0)
+
+      if (id(esptime).now().timestamp >= id(display_timer)) {
+        id(show_power) = false;
+      }
+
+      it.image( col1, line1 + icon_offset, id(outdoor_temp));
+
+      it.printf(col1, line1 + unit_offset, font_unit, Color(id(my_text_color)), TextAlign::LEFT, "C");
+      it.printf(col2, line1, font, Color(id(my_text_color)), TextAlign::LEFT, "%.1f", id(outdoor_t).state);
+      it.strftime(col2+125, line1, font, Color(id(my_time_color)), TextAlign::LEFT, "%H:%M", id(esptime).now());
+
+      if (id(show_power)) {
+          it.image( col1, line2 + icon_offset, id(eletricity));
+          it.printf(col1, line2 + unit_offset, font_unit, Color(id(my_text_color)), TextAlign::LEFT, "Kr");
+          it.printf(col2, line2, font, Color(id(my_text_color)), TextAlign::LEFT, "%.2f", id(price_sensor).state);
+
+          it.image( col1, line3 + icon_offset, id(eletricity_useage));
+          it.printf(col1, line3 + unit_offset, font_unit, Color(id(my_text_color)), TextAlign::LEFT, "W");
+          it.printf(col2, line3, font, Color(id(my_text_color)), TextAlign::LEFT, "%.0f", id(usage_sensor).state);
+      } else {
+        int graph_hight = 166;
+        int graph_width = 288; /* Length of data so it can't be changed */
+        int graph_line_width = 1;
+        int graph_max = CEIL5(id(outdoor_history_max));
+        int graph_min = FLOOR5(id(outdoor_history_min));
+        int graph_span = abs(graph_max - graph_min);
+        float graph_pixels_per_deg = (float) graph_hight / (float) graph_span;
+        ESP_LOGD("custom", "graph_max %d", graph_max);
+        ESP_LOGD("custom", "graph_span %d", graph_span);
+        ESP_LOGD("custom", "graph_pixels_per_deg %f: ", graph_pixels_per_deg);
+
+        char tmp_str[4];
+        itoa(graph_max, tmp_str, 10);
+        it.printf(col_graph - 3, line_graph - 11, font_scale, Color(id(my_text_color)), TextAlign::RIGHT, tmp_str);
+        itoa(graph_min, tmp_str, 10);
+        it.printf(col_graph - 3, line_graph - 11 + graph_hight, font_scale, Color(id(my_text_color)), TextAlign::RIGHT, tmp_str);
+
+        /* horizotal grid */
+        int horizontal_lines = 5;
+        for (int i = 0; i < horizontal_lines - 1; i++) {
+          int line_pos = line_graph + (i + 1) * (graph_hight/horizontal_lines);
+          it.line(col_graph, line_pos, col_graph + graph_width, line_pos, white);
+          itoa(graph_max - (graph_span/horizontal_lines) * (i + 1), tmp_str, 10);
+          it.printf(col_graph - 3, line_pos - 11, font_scale, Color(id(my_text_color)), TextAlign::RIGHT, tmp_str);
+        }
+
+        /* Verical grid */
+        int verticle_lines = 6;
+        for (int i = 0; i < verticle_lines - 1; i++) {
+          int line_pos = col_graph + (i + 1) * (graph_width/verticle_lines);
+          it.line(line_pos, line_graph, line_pos, line_graph + graph_hight, white);
+        }
+
+        for (int i = 0; i < graph_width - 1 ; i++) {
+          if (id(show_power))
+            break;
+          int x = col_graph + i + 1;
+          int y = line_graph + 1 + (round(graph_pixels_per_deg * (graph_max - id(outdoor_history_filtered)[i]) ));
+          //ESP_LOGD("custom", "x, y %d, %d: ", x, y);
+          it.filled_circle(x, y, graph_line_width, id(plot_color));
+        }
+        it.line(col_graph, line_graph, col_graph + graph_width, line_graph, white); /* Top */
+        it.line(col_graph, line_graph, col_graph, line_graph + graph_hight, white); /* Right */
+        it.line(col_graph-1, line_graph, col_graph-1, line_graph + graph_hight, black); /* Right mask out first half circle outside */
+        it.line(col_graph + graph_width, line_graph, col_graph + graph_width, line_graph + graph_hight, white); /* Left */
+        it.line(col_graph, line_graph + graph_hight, col_graph + graph_width, line_graph + graph_hight, white); /* Bottom */
+      }
