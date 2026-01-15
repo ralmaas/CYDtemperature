@@ -1,4 +1,5 @@
 CYDtemperature
+==============
 This project is using the famous CYD (Cheap Yellow Display) to show a graph of the last 24 hours outside temperature.
 
 Disclaimer:
